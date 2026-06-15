@@ -34,6 +34,7 @@ type DB struct {
 	withdrawableUnbondingLocks       *sql.Stmt
 	insertWinningTicket              *sql.Stmt
 	selectEarliestWinningTicket      *sql.Stmt
+	selectWinningTickets             *sql.Stmt
 	winningTicketCount               *sql.Stmt
 	markWinningTicketRedeemed        *sql.Stmt
 	removeWinningTicket              *sql.Stmt
@@ -298,6 +299,15 @@ func InitDB(dbPath string) (*DB, error) {
 	}
 	d.selectEarliestWinningTicket = stmt
 
+	// Select all unredeemed in-window tickets ordered earliest first
+	stmt, err = db.Prepare("SELECT sender, recipient, faceValue, winProb, senderNonce, recipientRand, recipientRandHash, sig, creationRound, creationRoundBlockHash, paramsExpirationBlock FROM ticketQueue WHERE sender=? AND creationRound >= ? AND redeemedAt IS NULL AND txHash IS NULL ORDER BY createdAt ASC")
+	if err != nil {
+		glog.Error("Unable to prepare selectWinningTickets ", err)
+		d.Close()
+		return nil, err
+	}
+	d.selectWinningTickets = stmt
+
 	stmt, err = db.Prepare("SELECT count(sig) FROM ticketQueue WHERE sender=? AND creationRound >= ? AND redeemedAt IS NULL AND txHash IS NULL")
 	if err != nil {
 		glog.Error("Unable to prepare winningTicketCount ", err)
@@ -395,6 +405,9 @@ func (db *DB) Close() {
 	}
 	if db.selectEarliestWinningTicket != nil {
 		db.selectEarliestWinningTicket.Close()
+	}
+	if db.selectWinningTickets != nil {
+		db.selectWinningTickets.Close()
 	}
 	if db.winningTicketCount != nil {
 		db.winningTicketCount.Close()
@@ -789,6 +802,57 @@ func (db *DB) SelectEarliestWinningTicket(sender ethcommon.Address, minCreationR
 		Sig:           sig,
 		RecipientRand: new(big.Int).SetBytes(recipientRand),
 	}, nil
+}
+
+// SelectWinningTickets selects all stored winning tickets for a 'sender' that are not expired and
+// not yet redeemed, ordered from earliest to latest
+func (db *DB) SelectWinningTickets(sender ethcommon.Address, minCreationRound int64) ([]*pm.SignedTicket, error) {
+	rows, err := db.selectWinningTickets.Query(sender.Hex(), minCreationRound)
+	if err != nil {
+		return nil, fmt.Errorf("could not retrieve winning tickets err=%q", err)
+	}
+	defer rows.Close()
+
+	var tickets []*pm.SignedTicket
+	for rows.Next() {
+		var (
+			senderString           string
+			recipient              string
+			faceValue              []byte
+			winProb                []byte
+			senderNonce            int
+			recipientRand          []byte
+			recipientRandHash      string
+			sig                    []byte
+			creationRound          int64
+			creationRoundBlockHash string
+			paramsExpirationBlock  int64
+		)
+		if err := rows.Scan(&senderString, &recipient, &faceValue, &winProb, &senderNonce, &recipientRand, &recipientRandHash, &sig, &creationRound, &creationRoundBlockHash, &paramsExpirationBlock); err != nil {
+			return nil, fmt.Errorf("could not retrieve winning tickets err=%q", err)
+		}
+
+		tickets = append(tickets, &pm.SignedTicket{
+			Ticket: &pm.Ticket{
+				Sender:                 sender,
+				Recipient:              ethcommon.HexToAddress(recipient),
+				FaceValue:              new(big.Int).SetBytes(faceValue),
+				WinProb:                new(big.Int).SetBytes(winProb),
+				SenderNonce:            uint32(senderNonce),
+				RecipientRandHash:      ethcommon.HexToHash(recipientRandHash),
+				CreationRound:          creationRound,
+				CreationRoundBlockHash: ethcommon.HexToHash(creationRoundBlockHash),
+				ParamsExpirationBlock:  big.NewInt(paramsExpirationBlock),
+			},
+			Sig:           sig,
+			RecipientRand: new(big.Int).SetBytes(recipientRand),
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("could not retrieve winning tickets err=%q", err)
+	}
+
+	return tickets, nil
 }
 
 // WinningTicketCount returns the amount of non-redeemed winning tickets for a 'sender'

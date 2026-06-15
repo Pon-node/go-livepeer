@@ -116,20 +116,18 @@ func (q *ticketQueue) handleBlockEvent(latestL1Block *big.Int) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
-	numTickets, err := q.Length()
+	// Fetch the in-window unredeemed tickets once and iterate them in order.
+	// A ticket that fails with a retryable error is left unmarked and skipped
+	// in favor of the next ticket, so a single stuck ticket cannot block the
+	// redemption of later tickets (head-of-line blocking). Unmarked tickets are
+	// retried on a subsequent block event.
+	minCreationRound := new(big.Int).Sub(q.tm.LastInitializedRound(), big.NewInt(ticketValidityPeriod)).Int64()
+	tickets, err := q.store.SelectWinningTickets(q.sender, minCreationRound)
 	if err != nil {
-		glog.Errorf("Error getting queue length err=%q", err)
+		glog.Errorf("Unable to select winning tickets err=%q", err)
 		return
 	}
-	for i := 0; i < int(numTickets); i++ {
-		nextTicket, err := q.store.SelectEarliestWinningTicket(q.sender, new(big.Int).Sub(q.tm.LastInitializedRound(), big.NewInt(ticketValidityPeriod)).Int64())
-		if err != nil {
-			glog.Errorf("Unable to select earliest winning ticket err=%q", err)
-			return
-		}
-		if nextTicket == nil {
-			return
-		}
+	for _, nextTicket := range tickets {
 		if !q.isRecipientActive(nextTicket.Recipient) {
 			glog.V(5).Infof("Ticket recipient is not active in this round, cannot redeem ticket recipient=%v", nextTicket.Recipient.Hex())
 			continue

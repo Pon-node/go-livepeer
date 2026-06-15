@@ -200,6 +200,67 @@ func TestTicketQueueLoop_IsNonRetryableTicketErr_MarkAsRedeemed(t *testing.T) {
 	assert.False(ts.submitted[fmt.Sprintf("%x", ticket.Sig)])
 }
 
+func TestTicketQueueLoop_RetryableErr_DoesNotBlockLaterTickets(t *testing.T) {
+	assert := assert.New(t)
+
+	sender := RandAddress()
+	ts := newStubTicketStore()
+	tm := &stubTimeManager{round: big.NewInt(100)}
+	sm := &LocalSenderMonitor{
+		ticketStore: ts,
+		tm:          tm,
+	}
+
+	q := newTicketQueue(sender, sm)
+	q.Start()
+	defer q.Stop()
+
+	// The earliest ticket fails with a retryable error on every attempt.
+	// A later, redeemable ticket is queued behind it.
+	stuck := defaultSignedTicket(sender, 0)
+	good := defaultSignedTicket(sender, 1)
+	q.Add(stuck)
+	q.Add(good)
+	time.Sleep(20 * time.Millisecond)
+
+	// Consumer returns a retryable error for the stuck ticket and success
+	// for the good ticket, signaling once the good ticket reaches redemption.
+	goodRedeemed := make(chan struct{}, 1)
+	go func() {
+		for {
+			select {
+			case r := <-q.Redeemable():
+				var rerr error
+				if fmt.Sprintf("%x", r.SignedTicket.Sig) == fmt.Sprintf("%x", stuck.Sig) {
+					rerr = errors.New("insufficient funds for transfer") // retryable
+				}
+				r.resCh <- struct {
+					txHash ethcommon.Hash
+					err    error
+				}{r.SignedTicket.Hash(), rerr}
+				if fmt.Sprintf("%x", r.SignedTicket.Sig) == fmt.Sprintf("%x", good.Sig) {
+					goodRedeemed <- struct{}{}
+					return
+				}
+			case <-q.quit:
+				return
+			}
+		}
+	}()
+
+	tm.blockNumSink <- big.NewInt(1)
+
+	select {
+	case <-goodRedeemed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("later redeemable ticket was never reached - head-of-line blocking on retryable error")
+	}
+
+	time.Sleep(20 * time.Millisecond)
+	assert.True(ts.submitted[fmt.Sprintf("%x", good.Sig)], "later ticket should be redeemed")
+	assert.False(ts.submitted[fmt.Sprintf("%x", stuck.Sig)], "stuck ticket retryable err, must not be marked redeemed")
+}
+
 func TestTicketQueueLoopConcurrent(t *testing.T) {
 	assert := assert.New(t)
 

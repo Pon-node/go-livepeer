@@ -12,6 +12,11 @@ type TicketStore interface {
 	// which is not yet redeemed
 	SelectEarliestWinningTicket(sender ethcommon.Address, minCreationRound int64) (*SignedTicket, error)
 
+	// SelectWinningTickets selects all stored winning tickets for a 'sender' which are not yet
+	// redeemed, ordered from earliest to latest. Tickets with a creationRound below
+	// minCreationRound (outside the redemption validity window) are excluded.
+	SelectWinningTickets(sender ethcommon.Address, minCreationRound int64) ([]*SignedTicket, error)
+
 	// RemoveWinningTicket removes a ticket
 	RemoveWinningTicket(ticket *SignedTicket) error
 

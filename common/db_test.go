@@ -1074,6 +1074,70 @@ func TestSelectEarliestWinningTicket(t *testing.T) {
 
 }
 
+func TestSelectWinningTickets(t *testing.T) {
+	assert := assert.New(t)
+	dbh, dbraw, err := TempDB(t)
+	defer dbh.Close()
+	defer dbraw.Close()
+	require := require.New(t)
+	require.Nil(err)
+
+	sender := ethcommon.HexToAddress("charizard")
+
+	_, ticket, sig, recipientRand := defaultWinningTicket(t)
+	ticket.Sender = sender
+	defaultCreationRound := ticket.CreationRound
+	inWindow0 := &pm.SignedTicket{Ticket: ticket, Sig: sig, RecipientRand: recipientRand}
+
+	_, ticket, sig, recipientRand = defaultWinningTicket(t)
+	ticket.Sender = sender
+	inWindow1 := &pm.SignedTicket{Ticket: ticket, Sig: pm.RandBytes(32), RecipientRand: recipientRand}
+
+	_, ticket, sig, recipientRand = defaultWinningTicket(t)
+	ticket.Sender = sender
+	expired := &pm.SignedTicket{Ticket: ticket, Sig: pm.RandBytes(32), RecipientRand: recipientRand}
+	expired.CreationRound = defaultCreationRound - 100
+
+	// Ticket belonging to a different sender
+	_, ticket, sig, recipientRand = defaultWinningTicket(t)
+	ticket.Sender = ethcommon.HexToAddress("pikachu")
+	otherSender := &pm.SignedTicket{Ticket: ticket, Sig: pm.RandBytes(32), RecipientRand: recipientRand}
+
+	// no tickets stored yet
+	tickets, err := dbh.SelectWinningTickets(sender, defaultCreationRound)
+	assert.Nil(err)
+	assert.Empty(tickets)
+
+	for _, st := range []*pm.SignedTicket{inWindow0, inWindow1, expired, otherSender} {
+		require.Nil(dbh.StoreWinningTicket(st))
+	}
+
+	sigSet := func(ts []*pm.SignedTicket) map[string]bool {
+		m := make(map[string]bool)
+		for _, st := range ts {
+			m[ethcommon.Bytes2Hex(st.Sig)] = true
+		}
+		return m
+	}
+
+	// Returns both in-window tickets, excludes expired and other-sender tickets
+	tickets, err = dbh.SelectWinningTickets(sender, defaultCreationRound)
+	assert.Nil(err)
+	assert.Len(tickets, 2)
+	got := sigSet(tickets)
+	assert.True(got[ethcommon.Bytes2Hex(inWindow0.Sig)])
+	assert.True(got[ethcommon.Bytes2Hex(inWindow1.Sig)])
+	assert.False(got[ethcommon.Bytes2Hex(expired.Sig)])
+	assert.False(got[ethcommon.Bytes2Hex(otherSender.Sig)])
+
+	// Redeemed tickets are excluded
+	require.Nil(dbh.MarkWinningTicketRedeemed(inWindow0, pm.RandHash()))
+	tickets, err = dbh.SelectWinningTickets(sender, defaultCreationRound)
+	assert.Nil(err)
+	assert.Len(tickets, 1)
+	assert.Equal(inWindow1.Sig, tickets[0].Sig)
+}
+
 func TestMarkWinningTicketRedeemed_GivenNilTicket_ReturnsError(t *testing.T) {
 	dbh, dbraw, err := TempDB(t)
 	defer dbh.Close()
