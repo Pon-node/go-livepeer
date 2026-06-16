@@ -138,13 +138,14 @@ func (q *ticketQueue) handleBlockEvent(latestL1Block *big.Int) {
 				err    error
 			})
 
+			glog.Infof("Redeeming winning ticket sender=%v creationRound=%d senderNonce=%d faceValue=%v", nextTicket.Sender.Hex(), nextTicket.CreationRound, nextTicket.SenderNonce, nextTicket.FaceValue)
 			q.redeemable <- &redemption{nextTicket, resCh}
 			select {
 			case res := <-resCh:
 				// after receiving the response we can close the channel so it can be GC'd
 				close(resCh)
 				if res.err != nil {
-					glog.Errorf("Error redeeming err=%q", res.err)
+					glog.Errorf("Error redeeming sender=%v creationRound=%d senderNonce=%d err=%q", nextTicket.Sender.Hex(), nextTicket.CreationRound, nextTicket.SenderNonce, res.err)
 					// If the error is non-retryable then we mark the ticket as redeemed
 					if !isNonRetryableTicketErr(res.err) {
 						continue
